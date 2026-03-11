@@ -92,7 +92,7 @@ resource "aws_route_table_association" "public" { // connects a subnet to a rout
 }
 
 resource "aws_route_table_association" "private" { // connects a subnet to a route table
-  count          = length(var.private_subnet_cidrs)
+  count          = length(var.private_subnet_cidrs) // loop
   subnet_id      = aws_subnet.private[count.index].id
   route_table_id = aws_route_table.private[count.index].id
 }
