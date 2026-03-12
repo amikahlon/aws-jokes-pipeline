@@ -1,0 +1,222 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION:   eu-central-1
+  PROJECT_NAME: aws-jokes-pipeline
+
+jobs:
+  # ── 1. Build both images and push to ECR ────────────────────────────────────
+  build:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC
+      contents: read
+
+    outputs:
+      image_tag:    ${{ steps.meta.outputs.tag }}
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag (git SHA)
+        id: meta
+        run: echo "tag=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Build & push server
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG:      ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -t $REGISTRY/${{ env.PROJECT_NAME }}-server:$TAG \
+            ./server
+          docker push $REGISTRY/${{ env.PROJECT_NAME }}-server:$TAG
+
+      - name: Build & push client
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG:      ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -t $REGISTRY/${{ env.PROJECT_NAME }}-client:$TAG \
+            ./client
+          docker push $REGISTRY/${{ env.PROJECT_NAME }}-client:$TAG
+
+  # ── 2a. Deploy server (runs in parallel with deploy-client) ─────────────────
+  deploy-server:
+    name: Deploy Server
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout (needed for userdata script)
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build new Launch Template version
+        env:
+          REGISTRY:   ${{ needs.build.outputs.ecr_registry }}
+          TAG:        ${{ needs.build.outputs.image_tag }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          export IMAGE="$REGISTRY/${{ env.PROJECT_NAME }}-server:$TAG"
+
+          # Substitute env vars into the userdata template
+          USER_DATA=$(envsubst < scripts/userdata-server.sh | base64 -w 0)
+
+          # Find the Launch Template by name prefix
+          LT_ID=$(aws ec2 describe-launch-templates \
+            --filters "Name=launch-template-name,Values=${{ env.PROJECT_NAME }}-server-*" \
+            --query 'LaunchTemplates[0].LaunchTemplateId' \
+            --output text)
+
+          # Create a new LT version with the updated userdata
+          aws ec2 create-launch-template-version \
+            --launch-template-id "$LT_ID" \
+            --version-description "$TAG" \
+            --source-version '$Latest' \
+            --launch-template-data "{\"UserData\":\"$USER_DATA\"}"
+
+          # Point the ASG at the new LT version
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name "${{ env.PROJECT_NAME }}-asg-server" \
+            --launch-template "LaunchTemplateId=$LT_ID,Version=\$Latest"
+
+      - name: Start Instance Refresh
+        id: refresh
+        run: |
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "${{ env.PROJECT_NAME }}-asg-server" \
+            --preferences '{"MinHealthyPercentage": 100, "InstanceWarmup": 60}' \
+            --query 'InstanceRefreshId' \
+            --output text)
+          echo "refresh_id=$REFRESH_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for Instance Refresh to complete
+        env:
+          ASG_NAME:   ${{ env.PROJECT_NAME }}-asg-server
+          REFRESH_ID: ${{ steps.refresh.outputs.refresh_id }}
+        run: |
+          echo "Waiting for instance refresh $REFRESH_ID on $ASG_NAME ..."
+          for i in $(seq 1 40); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text)
+            echo "[$i/40] $STATUS"
+            case $STATUS in
+              Successful) echo "Server deploy complete."; exit 0 ;;
+              Failed|Cancelled|RollbackFailed)
+                echo "Instance refresh ended with status: $STATUS"
+                exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "Timeout: instance refresh did not finish in 20 minutes."
+          exit 1
+
+  # ── 2b. Deploy client (runs in parallel with deploy-server) ─────────────────
+  deploy-client:
+    name: Deploy Client
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout (needed for userdata script)
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build new Launch Template version
+        env:
+          REGISTRY:   ${{ needs.build.outputs.ecr_registry }}
+          TAG:        ${{ needs.build.outputs.image_tag }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          export IMAGE="$REGISTRY/${{ env.PROJECT_NAME }}-client:$TAG"
+
+          USER_DATA=$(envsubst < scripts/userdata-client.sh | base64 -w 0)
+
+          LT_ID=$(aws ec2 describe-launch-templates \
+            --filters "Name=launch-template-name,Values=${{ env.PROJECT_NAME }}-client-*" \
+            --query 'LaunchTemplates[0].LaunchTemplateId' \
+            --output text)
+
+          aws ec2 create-launch-template-version \
+            --launch-template-id "$LT_ID" \
+            --version-description "$TAG" \
+            --source-version '$Latest' \
+            --launch-template-data "{\"UserData\":\"$USER_DATA\"}"
+
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name "${{ env.PROJECT_NAME }}-asg-client" \
+            --launch-template "LaunchTemplateId=$LT_ID,Version=\$Latest"
+
+      - name: Start Instance Refresh
+        id: refresh
+        run: |
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "${{ env.PROJECT_NAME }}-asg-client" \
+            --preferences '{"MinHealthyPercentage": 100, "InstanceWarmup": 60}' \
+            --query 'InstanceRefreshId' \
+            --output text)
+          echo "refresh_id=$REFRESH_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for Instance Refresh to complete
+        env:
+          ASG_NAME:   ${{ env.PROJECT_NAME }}-asg-client
+          REFRESH_ID: ${{ steps.refresh.outputs.refresh_id }}
+        run: |
+          echo "Waiting for instance refresh $REFRESH_ID on $ASG_NAME ..."
+          for i in $(seq 1 40); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text)
+            echo "[$i/40] $STATUS"
+            case $STATUS in
+              Successful) echo "Client deploy complete."; exit 0 ;;
+              Failed|Cancelled|RollbackFailed)
+                echo "Instance refresh ended with status: $STATUS"
+                exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "Timeout: instance refresh did not finish in 20 minutes."
+          exit 1

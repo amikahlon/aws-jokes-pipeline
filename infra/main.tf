@@ -15,6 +15,7 @@ module "networking" {
 module "security" {
   source       = "./modules/security"
   project_name = var.project_name
+  github_repo  = var.github_repo
 }
 
 module "compute" {
