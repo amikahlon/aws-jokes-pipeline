@@ -135,10 +135,8 @@ resource "aws_launch_template" "client" {
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
-    yum update -y
-    amazon-linux-extras install docker -y
-    systemctl start docker
-    systemctl enable docker
+    dnf install docker -y
+    systemctl enable --now docker
   EOF
   )
 
@@ -164,10 +162,8 @@ resource "aws_launch_template" "server" {
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
-    yum update -y
-    amazon-linux-extras install docker -y
-    systemctl start docker
-    systemctl enable docker
+    dnf install docker -y
+    systemctl enable --now docker
   EOF
   )
 
