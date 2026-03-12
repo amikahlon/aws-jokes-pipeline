@@ -98,16 +98,12 @@ jobs:
             --output text)
 
           # Create a new LT version with the updated userdata
+          # (ASG already tracks $Latest, so no UpdateAutoScalingGroup needed)
           aws ec2 create-launch-template-version \
             --launch-template-id "$LT_ID" \
             --version-description "$TAG" \
             --source-version '$Latest' \
             --launch-template-data "{\"UserData\":\"$USER_DATA\"}"
-
-          # Point the ASG at the new LT version
-          aws autoscaling update-auto-scaling-group \
-            --auto-scaling-group-name "${{ env.PROJECT_NAME }}-asg-server" \
-            --launch-template "LaunchTemplateId=$LT_ID,Version=\$Latest"
 
       - name: Start Instance Refresh
         id: refresh
@@ -182,10 +178,6 @@ jobs:
             --version-description "$TAG" \
             --source-version '$Latest' \
             --launch-template-data "{\"UserData\":\"$USER_DATA\"}"
-
-          aws autoscaling update-auto-scaling-group \
-            --auto-scaling-group-name "${{ env.PROJECT_NAME }}-asg-client" \
-            --launch-template "LaunchTemplateId=$LT_ID,Version=\$Latest"
 
       - name: Start Instance Refresh
         id: refresh
