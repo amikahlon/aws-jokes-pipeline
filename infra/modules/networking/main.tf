@@ -19,7 +19,7 @@ resource "aws_internet_gateway" "main" {
 
 # ── Public Subnets ────────────────────────────────
 resource "aws_subnet" "public" {
-  count             = length(var.public_subnet_cidrs) // כמה סאבנטים ציבוריים ליצור
+  count             = length(var.public_subnet_cidrs)
   vpc_id            = aws_vpc.main.id
   cidr_block        = var.public_subnet_cidrs[count.index]
   availability_zone = var.azs[count.index]
@@ -41,14 +41,14 @@ resource "aws_subnet" "private" {
   }
 }
 
-# ── NAT Gateway ───────────────────────────────────
+# ── NAT Gateways ──────────────────────────────────
 resource "aws_eip" "nat" {
-  count  = length(var.public_subnet_cidrs) // 2 elastic IPs for 2 NAT gateways
+  count  = length(var.public_subnet_cidrs)
   domain = "vpc"
 }
 
 resource "aws_nat_gateway" "main" {
-  count         = length(var.public_subnet_cidrs) // 2 NAT gateways for 2 public subnets
+  count         = length(var.public_subnet_cidrs)
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
 
@@ -72,7 +72,7 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table" "private" {
-  count  = length(var.private_subnet_cidrs) // 2 route tables for 2 private subnets 
+  count  = length(var.private_subnet_cidrs)
   vpc_id = aws_vpc.main.id
 
   route {
@@ -85,14 +85,14 @@ resource "aws_route_table" "private" {
   }
 }
 
-resource "aws_route_table_association" "public" { // connects a subnet to a route table
-  count          = length(var.public_subnet_cidrs) // loop
+resource "aws_route_table_association" "public" {
+  count          = length(var.public_subnet_cidrs)
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "private" { // connects a subnet to a route table
-  count          = length(var.private_subnet_cidrs) // loop
+resource "aws_route_table_association" "private" {
+  count          = length(var.private_subnet_cidrs)
   subnet_id      = aws_subnet.private[count.index].id
   route_table_id = aws_route_table.private[count.index].id
 }

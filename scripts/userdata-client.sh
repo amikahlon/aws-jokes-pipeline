@@ -1,8 +1,7 @@
 #!/bin/bash
 set -e
 
-yum update -y
-amazon-linux-extras install docker -y
+dnf install docker -y
 systemctl start docker
 systemctl enable docker
 

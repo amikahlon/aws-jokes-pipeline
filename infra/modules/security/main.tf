@@ -56,7 +56,7 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "ecr:CompleteLayerUpload",
           "ecr:PutImage"
         ]
-        Resource = "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${var.project_name}-*"
+        Resource = "arn:aws:ecr:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:repository/${var.project_name}-*"
       },
       # EC2 – read & create new Launch Template versions
       {
@@ -67,6 +67,17 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "ec2:CreateLaunchTemplateVersion"
         ]
         Resource = "*"
+      },
+      # IAM – allow passing the EC2 role to EC2 (required when LT contains an instance profile)
+      {
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-ec2-role"
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ec2.amazonaws.com"
+          }
+        }
       },
       # AutoScaling – update ASG + instance refresh
       {
@@ -137,7 +148,8 @@ resource "aws_iam_instance_profile" "ec2" {
 
 # ── Secrets Manager ───────────────────────────────
 resource "aws_secretsmanager_secret" "app" {
-  name = "${var.project_name}/app"
+  name                    = "${var.project_name}/app"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "app" {
